@@ -140,8 +140,19 @@ int redisRioLoadTimeMillisecond(redisRio *p, long long *val) {
   return (*val = rdbLoadMillisecondTime(&(p->rdb))) >= 0 ? 0 : -1;
 }
 
+static void *rdbLoadZsetObject(int typ, rio *rdb) {
+  serverAssert(typ == RDB_TYPE_ZSET || typ == RDB_TYPE_ZSET_2);
+  return rdbLoadObject(typ, rdb);
+}
+
 void *redisRioLoadObject(redisRio *p, int typ) {
-  return rdbLoadObject(typ, &(p->rdb));
+  switch (typ) {
+  default:
+    return rdbLoadObject(typ, &(p->rdb));
+  case RDB_TYPE_ZSET:
+  case RDB_TYPE_ZSET_2:
+    return rdbLoadZsetObject(typ, &(p->rdb));
+  }
 }
 
 void *redisRioLoadStringObject(redisRio *p) {
