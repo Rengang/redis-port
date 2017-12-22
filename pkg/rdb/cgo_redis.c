@@ -145,11 +145,6 @@ typedef struct {
   double score;
 } zsetNode;
 
-static int zsetNodeCompare(const void *node1, const void *node2) {
-  double d = ((zsetNode *)node1)->score - ((zsetNode *)node2)->score;
-  return d < 0 ? -1 : (d > 0 ? 1 : 0);
-}
-
 typedef struct {
   size_t len, cap;
   zsetNode *buf;
@@ -181,13 +176,85 @@ static size_t zsetNodeVectorPush(zsetNodeVector *p, sds sdsele, double score) {
   return p->len;
 }
 
-static void zsetNodeVectorSort(zsetNodeVector *p) {
-  qsort(p->buf, p->len, sizeof(p->buf[0]), zsetNodeCompare);
+static int zsetNodeCompareReversedOrder(const void *node1, const void *node2) {
+  double d = ((zsetNode *)node1)->score - ((zsetNode *)node2)->score;
+  return d < 0 ? 1 : (d > 0 ? -1 : 0);
 }
 
-static void *rdbLoadZsetObject(int typ, rio *rdb) {
-  serverAssert(typ == RDB_TYPE_ZSET || typ == RDB_TYPE_ZSET_2);
-  return rdbLoadObject(typ, rdb);
+static int zsetNodeVectorInReversedOrder(zsetNodeVector *p) {
+  for (size_t i = 0, j = 1; j < p->len; i++, j++) {
+    if (zsetNodeCompareReversedOrder(&(p->buf[i]), &(p->buf[j])) <= 0) {
+      continue;
+    }
+    return 0;
+  }
+  return 1;
+}
+
+static void zsetNodeVectorSortReversedOrder(zsetNodeVector *p) {
+  if (!zsetNodeVectorInReversedOrder(p)) {
+    qsort(p->buf, p->len, sizeof(p->buf[0]), zsetNodeCompareReversedOrder);
+  }
+}
+
+static void *rdbLoadZsetObject(int rdbtype, rio *rdb) {
+  serverAssert(rdbtype == RDB_TYPE_ZSET || rdbtype == RDB_TYPE_ZSET_2);
+  /* Read list/set value. */
+  uint64_t zsetlen;
+  size_t maxelelen = 0;
+  zset *zs;
+
+  if (rdbtype == RDB_TYPE_ZSET) {
+    printf("RDB_TYPE_ZSET\n");
+  } else {
+    printf("RDB_TYPE_ZSET_2\n");
+  }
+  if ((zsetlen = rdbLoadLen(rdb, NULL)) == RDB_LENERR) return NULL;
+
+  zsetNodeVector *v = zsetNodeVectorInit(zsetlen);
+
+  robj *o = createZsetObject();
+  zs = o->ptr;
+  dictExpand(zs->dict, zsetlen);
+
+  /* Load every single element of the sorted set. */
+  while (zsetlen--) {
+    sds sdsele;
+    double score;
+    // zskiplistNode *znode;
+
+    if ((sdsele = rdbGenericLoadStringObject(rdb, RDB_LOAD_SDS, NULL)) == NULL)
+      return NULL;
+
+    if (rdbtype == RDB_TYPE_ZSET_2) {
+      if (rdbLoadBinaryDoubleValue(rdb, &score) == -1) return NULL;
+    } else {
+      if (rdbLoadDoubleValue(rdb, &score) == -1) return NULL;
+    }
+
+    /* Don't care about integer-encoded strings. */
+    if (sdslen(sdsele) > maxelelen) maxelelen = sdslen(sdsele);
+
+    zsetNodeVectorPush(v, sdsele, score);
+
+    // znode = zslInsert(zs->zsl, score, sdsele);
+    //  dictAdd(zs->dict, sdsele, &znode->score);
+  }
+
+  zsetNodeVectorSortReversedOrder(v);
+  for (size_t i = 0; i < v->len; i++) {
+    zsetNode *node = &(v->buf[i]);
+    zskiplistNode *znode;
+    znode = zslInsert(zs->zsl, node->score, node->sdsele);
+    dictAdd(zs->dict, node->sdsele, &znode->score);
+  }
+  zsetNodeVectorFree(v);
+
+  /* Convert *after* loading, since sorted sets are not stored ordered. */
+  if (zsetLength(o) <= server.zset_max_ziplist_entries &&
+      maxelelen <= server.zset_max_ziplist_value)
+    zsetConvert(o, OBJ_ENCODING_ZIPLIST);
+  return o;
 }
 
 void *redisRioLoadObject(redisRio *p, int typ) {
