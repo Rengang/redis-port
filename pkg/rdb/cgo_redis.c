@@ -140,6 +140,51 @@ int redisRioLoadTimeMillisecond(redisRio *p, long long *val) {
   return (*val = rdbLoadMillisecondTime(&(p->rdb))) >= 0 ? 0 : -1;
 }
 
+typedef struct {
+  sds sdsele;
+  double score;
+} zsetNode;
+
+static int zsetNodeCompare(const void *node1, const void *node2) {
+  double d = ((zsetNode *)node1)->score - ((zsetNode *)node2)->score;
+  return d < 0 ? -1 : (d > 0 ? 1 : 0);
+}
+
+typedef struct {
+  size_t len, cap;
+  zsetNode *buf;
+} zsetNodeVector;
+
+static zsetNodeVector *zsetNodeVectorInit(size_t cap) {
+  zsetNodeVector *p = zmalloc(sizeof(*p));
+  p->len = 0, p->cap = cap;
+  if (p->cap != 0) {
+    p->buf = zmalloc(sizeof(p->buf[0]) * p->cap);
+  } else {
+    p->buf = NULL;
+  }
+  return p;
+}
+
+static void zsetNodeVectorFree(zsetNodeVector *p) {
+  zfree(p->buf);
+  zfree(p);
+}
+
+static size_t zsetNodeVectorPush(zsetNodeVector *p, sds sdsele, double score) {
+  if (p->len == p->cap) {
+    p->cap = (p->cap != 0) ? p->cap * 4 : 1024;
+    p->buf = zrealloc(p->buf, sizeof(p->buf[0]) * p->cap);
+  }
+  zsetNode node = {.sdsele = sdsele, .score = score};
+  memcpy(p->buf + (p->len++), &node, sizeof(node));
+  return p->len;
+}
+
+static void zsetNodeVectorSort(zsetNodeVector *p) {
+  qsort(p->buf, p->len, sizeof(p->buf[0]), zsetNodeCompare);
+}
+
 static void *rdbLoadZsetObject(int typ, rio *rdb) {
   serverAssert(typ == RDB_TYPE_ZSET || typ == RDB_TYPE_ZSET_2);
   return rdbLoadObject(typ, rdb);
